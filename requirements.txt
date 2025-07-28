@@ -1,8 +1,5 @@
-streamlit==1.38.0          # 继续固定
-torch==2.5.1               # 升级，CPU 轮子自动安装
-numpy==2.1.0
-pandas==2.2.2
-scikit-learn==1.5.1
-tqdm
-joblib
+streamlit
+torch==2.4.0
+numpy
+scikit-learn
 
