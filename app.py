@@ -1,167 +1,162 @@
-# app.py
-import os, re, math, joblib, io
-from typing import List, Tuple
-
+# app.py  ── Streamlit 前端
+import os
+import math
+import re
+import pickle
 import numpy as np
-import pandas as pd
-import torch
-import torch.nn.functional as F
-import torch.nn as nn
 import streamlit as st
+import torch
+from sklearn.preprocessing import StandardScaler
+import pandas as pd 
 
-# ------------------------- 1. 模型定义 -------------------------
-class MTWAE(nn.Module):
-    def __init__(self, in_features: int, latent_size: int = 8):
-        super().__init__()
-        # 编码器
-        self.encoder_layer = nn.Sequential(
-            nn.Linear(in_features, 90), nn.LayerNorm(90), nn.LeakyReLU(),
-            nn.Linear(90, 48), nn.LayerNorm(48), nn.LeakyReLU(),
-            nn.Linear(48, 30), nn.LayerNorm(30), nn.LeakyReLU(),
-            nn.Linear(30, latent_size),
-        )
-        # 解码器（这里只是占位，推断时其实用不到）
-        self.decoder_layer = nn.Sequential(
-            nn.Linear(latent_size, 30), nn.LayerNorm(30), nn.LeakyReLU(),
-            nn.Linear(30, 48), nn.LayerNorm(48), nn.LeakyReLU(),
-            nn.Linear(48, 90), nn.LayerNorm(90), nn.LeakyReLU(),
-            nn.Linear(90, in_features),
-        )
-        # 三个性质预测头
-        self.Bs_head = self._make_head(latent_size)
-        self.Hc_head = self._make_head(latent_size)
-        self.Dc_head = self._make_head(latent_size)
+# ───────────────────────────────
+# ❶ 载入模型和 Scaler（首次会略慢）
+# ───────────────────────────────
+@st.cache_resource(show_spinner=True)
+def load_model_and_scalers(model_path: str, scaler_dir: str):
+    # • 载入训练好的 MTWAE
+    from mtwae_model import MTWAE           # ← 复制自你原脚本，或单独保存成 mtwae_model.py
+    device = torch.device('cpu')           # 部署端通常不带 GPU
+    model = MTWAE(in_features=30, latent_size=8).to(device)
+    model.load_state_dict(torch.load(model_path, map_location=device))
+    model.eval()
 
-    @staticmethod
-    def _make_head(latent_size):
-        return nn.Sequential(
-            nn.Linear(latent_size, 90), nn.LayerNorm(90), nn.LeakyReLU(),
-            nn.Linear(90, 90), nn.LayerNorm(90), nn.LeakyReLU(),
-            nn.Linear(90, 90), nn.LayerNorm(90), nn.LeakyReLU(),
-            nn.Linear(90, 1),
-        )
+    # • 载入 3 个目标变量的 scaler
+    with open(os.path.join(scaler_dir, "Bs_scaler.pkl"), "rb") as f:
+        Bs_scaler = pickle.load(f)
+    with open(os.path.join(scaler_dir, "Hc_scaler.pkl"), "rb") as f:
+        Hc_scaler = pickle.load(f)
+    with open(os.path.join(scaler_dir, "Dc_scaler.pkl"), "rb") as f:
+        Dc_scaler = pickle.load(f)
 
-    # -------- 推断路径 --------
-    def forward(self, X):
-        z = self.encoder_layer(X)
-        pred_Bs = self.Bs_head(z)
-        pred_Hc = self.Hc_head(z)
-        pred_Dc = self.Dc_head(z)
-        return pred_Bs, pred_Hc, pred_Dc
+    return model, Bs_scaler, Hc_scaler, Dc_scaler, device
 
-# ----------------------- 2. 工具函数 --------------------------
+# ───────────────────────────────
+# ❷ 基础工具函数（与你原脚本一致）
+# ───────────────────────────────
 PERIODIC_TABLE = [
     'Fe','B','Si','P','C','Co','Nb','Ni','Mo','Zr','Ga','Al',
     'Dy','Cu','Cr','Y','Nd','Hf','Ti','Tb','Ho','Ta','Er','Sn',
     'W','Tm','Gd','Sm','V','Pr'
 ]
 
-COMP_PATTERN = re.compile(r"([A-Z][a-z]?)([\d\.]+)")
+def parse_composition_str(comp_str):
+    """'Fe68.2Co17.5B13Si0.5Cu0.8' → (['Fe','Co',...], [68.2,17.5,...])"""
+    pattern = r"([A-Z][a-z]?)([\d\.]+)"
+    matches = re.findall(pattern, comp_str.strip())
+    elements, fracs = zip(*matches) if matches else ([], [])
+    return list(elements), list(map(float, fracs))
 
-def parse_composition(comp_str: str) -> Tuple[List[str], List[float]]:
-    """从 'Fe68.2Co17.5B13' 解析元素与含量"""
-    matches = COMP_PATTERN.findall(comp_str.strip())
-    if not matches:
-        raise ValueError(f"无法解析合金成分: {comp_str}")
-    elements, fracs = zip(*matches)
-    return list(elements), [float(x) for x in fracs]
+def get_element_index(element_list, periodic_table=PERIODIC_TABLE):
+    return [periodic_table.index(e) for e in element_list]
 
-def to_feature_vector(elements: List[str], fracs: List[float]) -> np.ndarray:
-    """将元素列表映射到 30 维特征"""
-    vec = np.zeros(len(PERIODIC_TABLE), dtype=np.float32)
-    for e, f in zip(elements, fracs):
-        if e not in PERIODIC_TABLE:
-            raise ValueError(f"元素 {e} 不在 30 元素表中")
-        vec[PERIODIC_TABLE.index(e)] = f * 0.01  # 直接百分含量 → 0-1
+def composition_to_vector(elem_list, frac_list, periodic_table=PERIODIC_TABLE):
+    vec = np.zeros(len(periodic_table))
+    for e, f in zip(elem_list, frac_list):
+        vec[periodic_table.index(e)] = f / 100.0   # 转成原子百分比（0‑1）
     return vec
 
-@st.cache_resource(show_spinner=False)
-def load_artifacts():
-    """一次性加载模型与 Scaler"""
-    device = torch.device("cpu")  # 推断阶段 CPU 就够用了
-    model = MTWAE(in_features=len(PERIODIC_TABLE), latent_size=8).to(device)
-    ckpt = torch.load("Multi_task_generative_Model_train_latent_8_sigma_8_joint_test_o1_Normalized_epoch_800.pth", map_location=device)
-    model.load_state_dict(ckpt)
-    model.eval()
-
-    Bs_scaler = joblib.load("Bs_scaler.pkl")
-    Hc_scaler = joblib.load("Hc_scaler.pkl")
-    Dc_scaler = joblib.load("Dc_scaler.pkl")
-    return model, Bs_scaler, Hc_scaler, Dc_scaler, device
-
-def predict_batch(comp_list: List[str]):
-    model, Bs_s, Hc_s, Dc_s, device = load_artifacts()
-    feature_mat = []
-    valid_names = []
-    errors = []
-
-    for comp in comp_list:
-        if not comp.strip():                # 跳过空行
+@torch.no_grad()
+def predict(model, scalers, device, comp_strings):
+    Bs_scl, Hc_scl, Dc_scl = scalers
+    X = []
+    valid_idx = []
+    for i, s in enumerate(comp_strings):
+        elems, fracs = parse_composition_str(s)
+        if not elems:
             continue
-        try:
-            eles, fracs = parse_composition(comp)
-            feature_mat.append(to_feature_vector(eles, fracs))
-            valid_names.append(comp)
-        except ValueError as e:
-            errors.append(str(e))
+        X.append(composition_to_vector(elems, fracs))
+        valid_idx.append(i)
+    if not X:
+        return [None] * len(comp_strings)
 
-    if not feature_mat:
-        return pd.DataFrame(), errors
+    X = torch.tensor(X, dtype=torch.float32, device=device)
+    _, _, pre_Bs, pre_Hc, pre_Dc = model(X)
 
-    X = torch.from_numpy(np.vstack(feature_mat)).float().to(device)
+    Bs = Bs_scl.inverse_transform(pre_Bs.cpu().numpy())
+    lnHc = Hc_scl.inverse_transform(pre_Hc.cpu().numpy())
+    Dc = Dc_scl.inverse_transform(pre_Dc.cpu().numpy())
 
-    with torch.no_grad():
-        pred_Bs, pred_Hc, pred_Dc = model(X)
+    # 组装结果（保持输入顺序）
+    out = [None] * len(comp_strings)
+    for k, idx in enumerate(valid_idx):
+        out[idx] = (float(Bs[k]), float(lnHc[k]), float(Dc[k]))
+    return out
 
-    # inverse_transform
-    Bs_vals = Bs_s.inverse_transform(pred_Bs.cpu().numpy())
-    lnHc_vals = Hc_s.inverse_transform(pred_Hc.cpu().numpy())
-    Dc_vals = Dc_s.inverse_transform(pred_Dc.cpu().numpy())
+# ───────────────────────────────
+# ❸ Streamlit 页面
+# ───────────────────────────────
+st.set_page_config(page_title="Fe‑based MG Property Predictor", layout="centered")
 
-    # exp 还原实际 Hc
-    Hc_vals = np.exp(lnHc_vals)
 
-    results = pd.DataFrame({
-        "Composition": valid_names,
-        "Bs / T": Bs_vals.flatten(),
-        "Hc (A/m)": Hc_vals.flatten(),
-        "ln(Hc)": lnHc_vals.flatten(),
-        "Dc / mm": Dc_vals.flatten(),
-    })
-    return results, errors
+# ⬇ 修改标题：点明三个预测指标
+st.title("Fe‑based Metallic Glass Property Predictor (Bs · Hc · Dc)")
 
-# -------------------- 3. Streamlit 前端 -----------------------
-st.set_page_config(page_title="Fe-based MGs Property Predictor",
-                   page_icon="🧲", layout="centered")
+st.caption(
+    "Enter **one composition per line** (e.g. `Fe68.2Co17.5B13Si0.5Cu0.8`).  "
+    "Supported elements: Fe, B, Si, P, C, Co, Nb, Ni, Mo, Zr, Ga, Al, … (共 30 种)."
+)
 
-st.title("🧲 Fe-based Metallic Glass Predictor (MTWAE)")
+# ▏折叠面板里放完整范围表
+with st.expander("▶  Recommended atomic‑% ranges for each element (click to show)", expanded=False):
+    st.markdown(
+        "|Element|Min|Max|\n|:--|:--|:--|\n"
+        "|Al|2.0|15.0|\n|B|1.0|25.0|\n|C|0.15|10.0|\n|Co|1.0|36.0|\n|Cr|1.0|6.0|\n"
+        "|Cu|0.1|1.25|\n|Dy|0.5|6.72|\n|Er|1.0|7.0|\n|Fe|30.0|89.0|\n|Ga|1.0|5.0|\n"
+        "|Gd|3.5|4.8|\n|Hf|1.67|12.0|\n|Ho|1.0|6.0|\n|Mo|1.0|10.0|\n|Nb|1.0|10.0|\n"
+        "|Nd|3.0|3.0|\n|Ni|1.0|38.4|\n|P|1.0|14.0|\n|Pr|3.5|3.5|\n|Si|0.9|19.2|\n"
+        "|Sm|3.0|3.5|\n|Sn|1.0|3.0|\n|Ta|0.75|4.0|\n|Tb|0.96|6.72|\n|Ti|1.0|5.0|\n"
+        "|Tm|4.8|5.0|\n|V|2.0|2.0|\n|W|2.0|4.0|\n|Y|1.0|6.0|\n|Zr|1.0|10.0|\n"
+    )
 
-st.markdown("""
-输入 **Fe-基合金** 质量百分数配比，例如：  
-Fe68.2Co17.5B13Si0.5Cu0.8
-Fe79.7Co6B13Si0.5Cu0.8
-- 支持一次粘贴多行，<kbd>Ctrl+Enter</kbd> 或点击 **Predict** 预测。  
-- Hc 显示两列：对数值 `ln(Hc)` 及还原后的实际 `Hc(A/m)`。  
-""")
+# • 侧边栏：模型与文件路径（如需切换不同模型时用）
+with st.sidebar:
+    st.header("Model Settings")
+    model_path = st.text_input("Model weight (*.pth)", "MTWAE_latent8.pth")
+    scaler_dir = st.text_input("Scaler directory", "scalers/")
+    if st.button("Reload model / scalers"):
+        st.cache_resource.clear()
 
-comp_input = st.text_area("Paste compositions (one per line)", height=200)
+# • 主界面：输入框
+default_samples = (
+    "Fe68.2Co17.5B13Si0.5Cu0.8\n"
+)
+user_input = st.text_area("Compositions", default_samples, height=180)
+comp_list = [s for s in user_input.splitlines() if s.strip()]
+
+# 预测按钮内部（替换原 table_data / st.dataframe 块）
 if st.button("Predict"):
-    comp_lines = comp_input.strip().splitlines()
-    if not comp_lines:
-        st.warning("请先输入至少一行合金成分。")
-    else:
-        with st.spinner("模型推断中..."):
-            df, errs = predict_batch(comp_lines)
-        if not df.empty:
-            st.success(f"成功预测 {len(df)} 条样本")
-            st.dataframe(df, use_container_width=True)
-            # 下载按钮
-            buf = io.BytesIO()
-            df.to_csv(buf, index=False)
-            st.download_button("下载结果 CSV", buf.getvalue(),
-                               file_name="prediction_results.csv",
-                               mime="text/csv")
-        if errs:
-            st.error("下列成分解析失败：\n" + "\n".join(errs))
+    with st.spinner("Loading model & predicting..."):
+        mdl, *scalers_device = load_model_and_scalers(model_path, scaler_dir)
+        Bs_scl, Hc_scl, Dc_scl, device = scalers_device
+        results = predict(mdl, (Bs_scl, Hc_scl, Dc_scl), device, comp_list)
+
+    # 组装成列表‑dict，便于 DataFrame 控制列顺序
+    rows = []
+    for idx, (comp, res) in enumerate(zip(comp_list, results), start=1):
+        if res is None:
+            rows.append({
+                "No.": idx,
+                "Composition": comp,
+                "Bs (T)": "Parse Error",
+                "ln(Hc) / Hc (A/m)": "–",
+                "Dc (mm)": "–"
+            })
+        else:
+            bs, lnhc, dc = res
+            hc = math.exp(lnhc)
+            rows.append({
+                "No.": idx,
+                "Composition": comp,
+                "Bs (T)": f"{bs:.3f}",
+                "ln(Hc) / Hc (A/m)": f"{lnhc:.3f} / {hc:.2f}",
+                "Dc (mm)": f"{dc:.3f}"
+            })
+
+    df = pd.DataFrame(rows, columns=[
+        "No.", "Composition", "Bs (T)", "ln(Hc) / Hc (A/m)", "Dc (mm)"
+    ])
+    st.dataframe(df, use_container_width=True,hide_index=True)
+    st.success("Done!")
 
 
