@@ -15,8 +15,8 @@ import pandas as pd
 @st.cache_resource(show_spinner=True)
 def load_model_and_scalers(model_path: str, scaler_dir: str):
     # • 载入训练好的 MTWAE
-    from mtwae_model import MTWAE           # ← 复制自你原脚本，或单独保存成 mtwae_model.py
-    device = torch.device('cpu')           # 部署端通常不带 GPU
+    from mtwae_model import MTWAE           
+    device = torch.device('cpu')           
     model = MTWAE(in_features=30, latent_size=8).to(device)
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
@@ -32,7 +32,7 @@ def load_model_and_scalers(model_path: str, scaler_dir: str):
     return model, Bs_scaler, Hc_scaler, Dc_scaler, device
 
 # ───────────────────────────────
-# ❷ 基础工具函数（与你原脚本一致）
+# ❷ 基础工具函数
 # ───────────────────────────────
 PERIODIC_TABLE = [
     'Fe','B','Si','P','C','Co','Nb','Ni','Mo','Zr','Ga','Al',
@@ -89,7 +89,7 @@ def predict(model, scalers, device, comp_strings):
 st.set_page_config(page_title="Fe‑based MG Property Predictor", layout="centered")
 
 
-# ⬇ 修改标题：点明三个预测指标
+# 
 st.title("Fe‑based Metallic Glass Property Predictor (Bs · Hc · Dc)")
 
 st.caption(
