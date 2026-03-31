@@ -75,6 +75,7 @@ def predict(model, scalers, device, comp_strings):
     
     out = [None] * len(comp_strings)
     for k, idx in enumerate(valid_idx):
+        print(f"Debug -> Type: {type(Bs[k])}, Value: {Bs[k]}")
         out[idx] = (float(Bs[k]), float(lnHc[k]), float(Dc[k]))
     return out
 
