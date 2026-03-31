@@ -56,27 +56,30 @@ def predict(model, scalers, device, comp_strings):
     Bs_scl, Hc_scl, Dc_scl = scalers
     X = []
     valid_idx = []
+
     for i, s in enumerate(comp_strings):
         elems, fracs = parse_composition_str(s)
         if not elems:
             continue
         X.append(composition_to_vector(elems, fracs))
         valid_idx.append(i)
+
     if not X:
         return [None] * len(comp_strings)
 
+    X = np.asarray(X, dtype=np.float32)
     X = torch.tensor(X, dtype=torch.float32, device=device)
+
     _, _, pre_Bs, pre_Hc, pre_Dc = model(X)
 
-    Bs = Bs_scl.inverse_transform(pre_Bs.cpu().numpy())
-    lnHc = Hc_scl.inverse_transform(pre_Hc.cpu().numpy())
-    Dc = Dc_scl.inverse_transform(pre_Dc.cpu().numpy())
+    Bs = Bs_scl.inverse_transform(pre_Bs.cpu().numpy()).reshape(-1)
+    lnHc = Hc_scl.inverse_transform(pre_Hc.cpu().numpy()).reshape(-1)
+    Dc = Dc_scl.inverse_transform(pre_Dc.cpu().numpy()).reshape(-1)
 
-    
     out = [None] * len(comp_strings)
     for k, idx in enumerate(valid_idx):
-        print(f"Debug -> Type: {type(Bs[k])}, Value: {Bs[k]}")
-        out[idx] = (float(Bs[k]), float(lnHc[k]), float(Dc[k]))
+        out[idx] = (Bs[k].item(), lnHc[k].item(), Dc[k].item())
+
     return out
 
 
