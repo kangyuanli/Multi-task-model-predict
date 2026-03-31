@@ -45,10 +45,20 @@ def parse_composition_str(comp_str):
 def get_element_index(element_list, periodic_table=PERIODIC_TABLE):
     return [periodic_table.index(e) for e in element_list]
 
+#def composition_to_vector(elem_list, frac_list, periodic_table=PERIODIC_TABLE):
+#    vec = np.zeros(len(periodic_table))
+#    for e, f in zip(elem_list, frac_list):
+#        vec[periodic_table.index(e)] = f / 100.0  
+#    return vec
+
 def composition_to_vector(elem_list, frac_list, periodic_table=PERIODIC_TABLE):
-    vec = np.zeros(len(periodic_table))
+    vec = np.zeros(len(periodic_table), dtype=np.float32)
     for e, f in zip(elem_list, frac_list):
-        vec[periodic_table.index(e)] = f / 100.0  
+        vec[periodic_table.index(e)] = f / 100.0
+
+    s = vec.sum()
+    if s > 0:
+        vec = vec / s
     return vec
 
 @torch.no_grad()
